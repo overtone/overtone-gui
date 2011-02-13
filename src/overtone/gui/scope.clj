@@ -211,14 +211,18 @@
 
 (dotimes [i (:width @scope*)] (aset x-array i i))
 
-(defn scope-frame []
-  (let [f (JFrame. "scope")]
-    (doto f
-      (.setPreferredSize (Dimension. 600 400))
-      (.add (scope-panel))
-      (.pack)
-      (.show)))
-  :scope)
+(defn scope-frame
+  "Display scope window. If you specify keep-on-top to be true, the window will stay on top of the other windows in your environment."
+  ([] (scope-frame false))
+  ([keep-on-top]
+     (let [f (JFrame. "scope")]
+       (doto f
+         (.setPreferredSize (Dimension. 600 400))
+         (.add (scope-panel))
+         (.pack)
+         (.show)
+         (.setAlwaysOnTop keep-on-top)))
+       :scope))
 
 (defn scope-on []
   (dosync (alter scope* assoc
