@@ -25,7 +25,8 @@
                       :color (Color. 0 130 226)
                       :background (Color. 50 50 50)
                       :width 600
-                      :height 400}))
+                      :height 400
+                      :pool (atom (make-pool))}))
 
 ; Some utility synths for signal routing and scoping
 (defsynth bus->buf [bus 20 buf 0]
@@ -227,14 +228,18 @@
 (defn scope-on []
   (dosync (alter scope* assoc
                  :status :on
-                 :runner (periodic update-scope (/ 1000 (:fps @scope*)))))
+                 :runner (periodic update-scope
+                                   (/ 1000 (:fps @scope*))
+                                   0
+                                   @(:pool @scope*))))
   :on)
 
 (defn scope-off []
   (.cancel (:runner @scope*) true)
   (dosync (alter scope* assoc
                  :status :off
-                 :runner nil))
+                 :runner nil
+                 :pool (stop-and-reset-pool! (:pool @scope*))))
   :off)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
