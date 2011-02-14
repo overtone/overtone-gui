@@ -8,7 +8,7 @@
     (javax.swing JFrame JPanel))
   (:use
      [overtone event util time-utils]
-     [overtone.sc core synth ugen buffer]
+     [overtone.sc core synth ugen buffer node]
     clojure.stacktrace)
   (:require [overtone.log :as log]
             [clojure.set :as set]))
@@ -148,7 +148,7 @@
     (if (:tmp-buf @scope*)
       (buffer-free (:buf @scope*)))
     (if-let [s (:bus-synth @scope*)]
-      (stop s))
+      (kill s))
     (alter scope* assoc :buf nil :tmp-buf false
            :bus nil :bus-synth nil))
   (dotimes [i (:width @scope*)]
