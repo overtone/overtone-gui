@@ -108,7 +108,7 @@
         buf (:buf @scope*)
         frames (buffer-data buf)
         step (int (/ (:size buf) width))
-        y-scale (/ (- height (* 2 Y-PADDING)) 2)
+        y-scale (/ (- height (* 2 Y-PADDING)) -2)
         y-shift (+ (/ height 2) Y-PADDING)]
     (dotimes [x width]
       (aset ^ints y-array x
