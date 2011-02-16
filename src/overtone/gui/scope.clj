@@ -1,6 +1,6 @@
 (ns
   ^{:doc "An oscilloscope style waveform viewer"
-     :author "Jeff Rose"}
+     :author "Jeff Rose & Sam Aaron"}
   overtone.gui.scope
   (:import
     (java.awt Graphics Dimension Color BasicStroke)
@@ -14,19 +14,14 @@
             [clojure.set :as set]))
 
 (def SCOPE-BUF-SIZE 4096)
+(def FPS 10)
+(def scopes* (atom {}))
+(def scope-pool* (atom nil))
 
-(defonce scope* (ref {:buf false
-                      :buf-size 0
-                      :bus 0
-                      :fps 10
-                      :status :off
-                      :runner nil
-                      :panel nil
-                      :color (Color. 0 130 226)
-                      :background (Color. 50 50 50)
-                      :width 600
-                      :height 400
-                      :pool (atom (make-pool))}))
+(def WIDTH 600)
+(def HEIGHT 400)
+(def X-PADDING 5)
+(def Y-PADDING 10)
 
 ; Some utility synths for signal routing and scoping
 (defsynth bus->buf [bus 20 buf 0]
@@ -35,77 +30,9 @@
 (defsynth bus->bus [in-bus 20 out-bus 0]
   (out out-bus (in in-bus)))
 
-(defsynth scoper-outer [buf 0]
-  (scope-out (sin-osc 200) buf))
-
-;		// linear
-;	SynthDef("freqScope0", { arg in=0, fftbufnum=0, scopebufnum=1, rate=4, phase=1, dbFactor = 0.02;
-;		var signal, chain, result, phasor, numSamples, mul, add;
-;		mul = 0.00285;
-;		numSamples = (BufSamples.kr(fftbufnum) - 2) * 0.5; // 1023 (bufsize=2048)
-;		signal = In.ar(in);
-;		chain = FFT(fftbufnum, signal, hop: 0.75, wintype:1);
-;		chain = PV_MagSmear(chain, 1);
-;		// -1023 to 1023, 0 to 2046, 2 to 2048 (skip first 2 elements DC and Nyquist)
-;		phasor = LFSaw.ar(rate/BufDur.kr(fftbufnum), phase, numSamples, numSamples + 2);
-;		phasor = phasor.round(2); // the evens are magnitude
-;		ScopeOut.ar( ((BufRd.ar(1, fftbufnum, phasor, 1, 1) * mul).ampdb * dbFactor) + 1, scopebufnum);
-;	}).send(server);
-
-(defsynth freq-scope-zero [in-bus 0 fft-buf 0 scope-buf 1
-                           rate 4 phase 1 db-factor 0.02]
-  (let [n-samples (* 0.5 (- (buf-samples:kr fft-buf) 2))
-        signal (in in-bus)
-        freqs  (fft fft-buf signal 0.75 :hann)
-;        chain  (pv-mag-smear fft-buf 1)
-        phasor (+ (+ n-samples 2)
-                  (* n-samples
-                     (lf-saw (/ rate (buf-dur:kr fft-buf)) phase)))
-        phasor (round phasor 2)]
-    (scope-out (* db-factor (ampdb (* 0.00285 (buf-rd 1 fft-buf phasor 1 1))))
-               scope-buf)))
-
-(defsynth freqs [in-bus 10 fft-buf 0]
-  (let [n-samples (* 0.5 (- (buf-samples:kr fft-buf) 2))
-        signal    (in in-bus 1)]
-    (fft fft-buf signal 0.75 :hann)))
-
-;	// logarithmic
-;	SynthDef("freqScope1", { arg in=0, fftbufnum=0, scopebufnum=1, rate=4, phase=1, dbFactor = 0.02;
-;		var signal, chain, result, phasor, halfSamples, mul, add;
-;		mul = 0.00285;
-;		halfSamples = BufSamples.kr(fftbufnum) * 0.5;
-;		signal = In.ar(in);
-;		chain = FFT(fftbufnum, signal, hop: 0.75, wintype:1);
-;		chain = PV_MagSmear(chain, 1);
-;		phasor = halfSamples.pow(LFSaw.ar(rate/BufDur.kr(fftbufnum), phase, 0.5, 0.5)) * 2; // 2 to bufsize
-;		phasor = phasor.round(2); // the evens are magnitude
-;		ScopeOut.ar( ((BufRd.ar(1, fftbufnum, phasor, 1, 1) * mul).ampdb * dbFactor) + 1, scopebufnum);
-;	}).send(server);
-;
-;(def scope-buf (buffer 2048))
-
-;(defsynth mellow [out-bus 20 freq 440 len 20]
-;  (out out-bus
-;  (* (x-line:kr 0.8 0.01 len :free) 0.1
-;    (+ (sin-osc (/ freq 2))
-;       (rlpf (saw (+ freq (* (sin-osc 6) 6))) 440 0.2)))))
-;
-
-(defonce x-array (int-array (:width @scope*)))
-(defonce _x-init (dotimes [i (:width @scope*)]
-                   (aset x-array i i)))
-
-(defonce y-array (int-array (:width @scope*)))
-(defonce _y-init (dotimes [i (:width @scope*)]
-                   (aset y-array i (/ (:height @scope*) 2))))
-
-(def X-PADDING 5)
-(def Y-PADDING 10)
-
-(defn- update-scope []
-  (let [{:keys [buf buf-size width height panel]} @scope*
-        buf (:buf @scope*)
+(defn- update-scope [s]
+  (let [{:keys [buf size width height panel y-array x-array panel]} s
+        _ (println "buf:" buf)
         frames (buffer-data buf)
         step (int (/ (:size buf) width))
         y-scale (/ (- height (* 2 Y-PADDING)) -2)
@@ -114,56 +41,23 @@
       (aset ^ints y-array x
             (int (+ y-shift
                     (* y-scale
-                       (aget ^floats frames (unchecked-multiply x step))))))))
-  (.repaint (:panel @scope*)))
+                       (aget ^floats frames (unchecked-multiply x step)))))))
+    (.repaint panel)))
 
-; Note: The fft ugen writes into a buffer:
-; dc, nyquist, real, imaginary, real, imaginary....
-(comment defn- update-scope []
-  (let [{:keys [buf width height panel]} @scope*
-        frames  (buffer-data buf)
-        n-reals (/ (- (:size buf) 2) 2)
-        step    (int (/ n-reals width))
-        y-scale (/ (- height (* 2 Y-PADDING)) 2)
-        y-shift (+ (/ height 2) Y-PADDING)]
-    (dotimes [x width]
-      (aset ^ints y-array x
-            (int (+ y-shift
-                    (* y-scale
-                       (aget ^floats frames
-                             (+ 2 (* 2 (unchecked-multiply x step))))))))))
-  (.repaint (:panel @scope*)))
+(defn- update-scopes []
+  (doall (map update-scope (vals @scopes*))))
 
-(defn- paint-scope [g]
-  (let [{:keys [background width height color]} @scope*]
-    (.setColor ^Graphics g ^Color background)
-    (.fillRect ^Graphics g 0 0 width height)
-    (.setColor ^Graphics g ^Color (Color. 100 100 100))
-    (.drawRect ^Graphics g 0 0 width height)
-
-    (.setColor ^Graphics g ^Color color)
-    (.drawPolyline ^Graphics g ^ints x-array ^ints y-array width)))
-
-(defn- clean-scope []
-  (dosync
-    (if (:tmp-buf @scope*)
-      (buffer-free (:buf @scope*)))
-    (if-let [s (:bus-synth @scope*)]
-      (kill s))
-    (alter scope* assoc :buf nil :tmp-buf false
-           :bus nil :bus-synth nil))
-  (dotimes [i (:width @scope*)]
-    (aset y-array i (/ (:height @scope*) 2)))
-  (.repaint (:panel @scope*)))
-
-(defn scope-buf
-  "Set a buffer to view in the scope."
-  [buf]
-  (clean-scope)
-  (dosync (alter scope* assoc
-                 :buf buf
-                 :buf-size (:size (buffer-info buf))))
-  (update-scope))
+(defn- paint-scope [g id]
+  (println "trying to paint" id )
+  (println "scope: "  (get @scopes* id))
+  (if-let [scope (get @scopes* id)]
+    (let [{:keys [background width height color x-array y-array]} scope]
+      (.setColor ^Graphics g ^Color background)
+      (.fillRect ^Graphics g 0 0 width height)
+      (.setColor ^Graphics g ^Color (Color. 100 100 100))
+      (.drawRect ^Graphics g 0 0 width height)
+      (.setColor ^Graphics g ^Color color)
+      (.drawPolyline ^Graphics g ^ints x-array ^ints y-array width))))
 
 (defn- wait-for-buffer [b]
   (loop [i 0]
@@ -175,72 +69,101 @@
 
 (def SCOPE-BUF-SIZE 4096)
 
-(defn- get-scope-buf []
-  (if-let [b (:buf @scope*)]
-    b
-    (let [buf (buffer SCOPE-BUF-SIZE)]
-      (dosync (alter scope* assoc :buf buf
-                     :buf-size SCOPE-BUF-SIZE))
-      buf)))
+(defn scope-panel [id width height]
+  (let [panel (proxy [JPanel] [true]
+                (paint [g] (paint-scope g id)))
+        _ (.setPreferredSize panel (Dimension. width height))]
+    panel))
 
-(defn scope-bus
-  "Set a bus to view in the scope."
-  [bus]
-  (clean-scope)
-  (let [buf (get-scope-buf)
-        _ (wait-for-buffer buf)
-        bus-synth (bus->buf :target 0 :position :tail bus buf)]
-    (dosync
-      (alter scope* assoc
-                   :bus bus
-                   :tmp-buf true
-                   :bus-synth bus-synth))
-    (apply-at (+ (now) 1000) update-scope [])
-    (update-scope)))
-
-(defn freq-scope-buf [buf]
-  )
-
-(defn scope-panel []
-  (let [p (proxy [JPanel] [true]
-            (paint [g] (paint-scope g)))]
-    (dosync (alter scope* assoc :panel p))
-    (doto p
-      ;(.setIgnoreRepaint true)
-      (.setPreferredSize (Dimension. 600 400)))
-    p))
-
-(dotimes [i (:width @scope*)] (aset x-array i i))
-
-(defn scope-frame
+(defn- scope-frame
   "Display scope window. If you specify keep-on-top to be true, the window will stay on top of the other windows in your environment."
-  ([] (scope-frame false))
-  ([keep-on-top]
-     (let [f (JFrame. "scope")]
+  ([panel title keep-on-top width height]
+     (let [f (JFrame. title)]
        (doto f
-         (.setPreferredSize (Dimension. 600 400))
-         (.add (scope-panel))
+         (.setPreferredSize (Dimension. width height))
+         (.add panel)
          (.pack)
          (.show)
-         (.setAlwaysOnTop keep-on-top)))
-       :scope))
+         (.setAlwaysOnTop keep-on-top)))))
 
-(defn scope-on []
-  (dosync (alter scope* assoc
-                 :status :on
-                 :runner (periodic update-scope
-                                   (/ 1000 (:fps @scope*))
-                                   0
-                                   @(:pool @scope*))))
-  :on)
+(defn- create-pool-if-necessary []
+  (locking scope-pool*
+    (if-not @scope-pool* (reset! scope-pool* (make-pool)))))
 
-(defn scope-off []
-  (.cancel (:runner @scope*) true)
-  (dosync (alter scope* assoc
-                 :status :off
-                 :runner nil
-                 :pool (stop-and-reset-pool! (:pool @scope*))))
-  :off)
+
+(defn- start-scopes-runner
+  []
+  (periodic update-scopes (/ 1000 FPS) 0 @scope-pool*))
+
+(defn scopes-start
+  []
+  (create-pool-if-necessary)
+  (start-scopes-runner))
+
+;;  (.cancel (:runner @scope*) true)
+(defn scopes-stop
+  []
+  (stop-and-reset-pool! scope-pool*))
+
+(defn- scope-bus
+  "Set a bus to view in the scope."
+  [s]
+  (let [buf (buffer SCOPE-BUF-SIZE)
+        _ (wait-for-buffer buf)
+        bus-synth (bus->buf :target 0 :position :tail (:num s) buf)]
+
+    (apply-at (+ (now) 1000) update-scope [])
+    (assoc s
+      :size SCOPE-BUF-SIZE
+      :bus-synth bus-synth
+      :buf buf)))
+
+(defn- scope-buf
+  "Set a buffer to view in the scope."
+  [s]
+  (assoc s
+    :size (:size (buffer-info (:num s)))
+    :buf (:num s)))
+
+(defn- mk-scope
+  [num kind keep-on-top width height]
+  (let [id      (str kind ": " num)
+        panel   (scope-panel id width height)
+        frame   (scope-frame panel id keep-on-top width height)
+        x-array (int-array width)
+        _x-init (dotimes [i width]
+                  (aset x-array i i))
+        y-array (int-array width)
+        _y-init (dotimes [i width]
+                  (aset y-array i (/ height 2)))
+        scope   {:id id
+                 :size 0
+                 :num num
+                 :panel panel
+                 :kind kind
+                 :color (Color. 0 130 226)
+                 :background (Color. 50 50 50)
+                 :frame frame
+                 :width width
+                 :height height
+                 :x-array x-array
+                 :y-array y-array}]
+    (case kind
+          :bus (scope-bus scope)
+          :buf (scope-buf scope))))
+
+(defn scope
+  ([&{:keys [bus buf keep-on-top]
+      :or {bus 0
+           buf -1
+           keep-on-top true}}]
+     (let [kind (if (= -1 buf) :bus :buf)
+           num  (if (= -1 buf) bus buf)
+           s (mk-scope num kind keep-on-top WIDTH HEIGHT)]
+       (swap! scopes* assoc (:id s) s)
+       (start-scopes-runner))))
+
+
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Testing
@@ -280,3 +203,57 @@
     (go-go-scope))
   (.show test-frame))
   )
+
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;; Spectragraph stuff to be worked on
+(comment
+  ; Note: The fft ugen writes into a buffer:
+; dc, nyquist, real, imaginary, real, imaginary....
+(comment defn- update-scope []
+  (let [{:keys [buf width height panel]} @scope*
+        frames  (buffer-data buf)
+        n-reals (/ (- (:size buf) 2) 2)
+        step    (int (/ n-reals width))
+        y-scale (/ (- height (* 2 Y-PADDING)) 2)
+        y-shift (+ (/ height 2) Y-PADDING)]
+    (dotimes [x width]
+      (aset ^ints y-array x
+            (int (+ y-shift
+                    (* y-scale
+                       (aget ^floats frames
+                             (+ 2 (* 2 (unchecked-multiply x step))))))))))
+  (.repaint (:panel @scope*)))
+
+(defsynth freq-scope-zero [in-bus 0 fft-buf 0 scope-buf 1
+                           rate 4 phase 1 db-factor 0.02]
+  (let [n-samples (* 0.5 (- (buf-samples:kr fft-buf) 2))
+        signal (in in-bus)
+        freqs  (fft fft-buf signal 0.75 :hann)
+;        chain  (pv-mag-smear fft-buf 1)
+        phasor (+ (+ n-samples 2)
+                  (* n-samples
+                     (lf-saw (/ rate (buf-dur:kr fft-buf)) phase)))
+        phasor (round phasor 2)]
+    (scope-out (* db-factor (ampdb (* 0.00285 (buf-rd 1 fft-buf phasor 1 1))))
+               scope-buf)))
+
+
+(defsynth freqs [in-bus 10 fft-buf 0]
+  (let [n-samples (* 0.5 (- (buf-samples:kr fft-buf) 2))
+        signal    (in in-bus 1)]
+    (fft fft-buf signal 0.75 :hann)))
+
+
+
+(defsynth scoper-outer [buf 0]
+  (scope-out (sin-osc 200) buf))
+(scope-out)
+
+(defn freq-scope-buf [buf]
+  )
+
+
+)
+
