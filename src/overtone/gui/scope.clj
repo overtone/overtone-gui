@@ -17,7 +17,6 @@
 (def FPS 10)
 (def scopes* (atom {}))
 (def scope-pool* (atom nil))
-
 (def WIDTH 600)
 (def HEIGHT 400)
 (def X-PADDING 5)
@@ -150,16 +149,25 @@
           :buf (scope-buf scope))))
 
 (defn scope
+  "Create a scope for either a bus or a buffer. Defaults to scoping bus 0.
+   Example use:
+   (scope :bus 1)
+   (scope :buf 10)"
   ([&{:keys [bus buf keep-on-top]
       :or {bus 0
            buf -1
-           keep-on-top true}}]
-     (let [kind (if (= -1 buf) :bus :buf)
+           keep-on-top false}}]
+     (let [buf (if (buffer? buf) (:id buf) buf)
+           kind (if (= -1 buf) :bus :buf)
            num  (if (= -1 buf) bus buf)
            s (mk-scope num kind keep-on-top WIDTH HEIGHT)]
        (swap! scopes* assoc (:id s) s)
        (scopes-start))))
 
+(defn pscope
+  "Creates a 'perminent' scope, i.e. one where the window is always kept on top of other OS windows. See scope."
+  ([& args]
+     (scope (assoc (apply hash-map args) :keep-on-top true))))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
